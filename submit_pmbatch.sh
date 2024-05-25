@@ -8,7 +8,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 #SBATCH -J afno
-#SBATCH --image=nersc/pytorch:ngc-22.02-v0
+###SBATCH --image=nersc/pytorch:ngc-22.02-v0
 #SBATCH -o afno_backbone_finetune.out
 
 config_file=./config/AFNO.yaml
@@ -20,10 +20,13 @@ export NCCL_NET_GDR_LEVEL=PHB
 
 export MASTER_ADDR=$(hostname)
 
+module load cray-python/3.11.5
+
+. .venv/bin/activate
+
 set -x
-srun -u --mpi=pmi2 shifter \
+srun -u --mpi=pmi2 \
     bash -c "
-    conda install timm
     source export_DDP_vars.sh
     python train.py --enable_amp --yaml_config=$config_file --config=$config --run_num=$run_num
     "

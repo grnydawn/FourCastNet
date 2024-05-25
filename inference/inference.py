@@ -67,7 +67,7 @@ logging_utils.config_logger()
 from utils.YParams import YParams
 from utils.data_loader_multifiles import get_data_loader
 from networks.afnonet import AFNONet
-import wandb
+#import wandb
 import matplotlib.pyplot as plt
 import glob
 from datetime import datetime

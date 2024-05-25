@@ -67,7 +67,7 @@ logging_utils.config_logger()
 from utils.YParams import YParams
 from utils.data_loader_multifiles import get_data_loader
 from networks.afnonet import AFNONet 
-import wandb
+#import wandb
 import matplotlib.pyplot as plt
 import glob
 
@@ -279,7 +279,7 @@ if __name__ == '__main__':
       logging_utils.log_versions()
       params.log()
 
-    params['log_to_wandb'] = (world_rank==0) and params['log_to_wandb']
+    #params['log_to_wandb'] = (world_rank==0) and params['log_to_wandb']
     params['log_to_screen'] = (world_rank==0) and params['log_to_screen']
 
     n_ics = params['n_initial_conditions']
