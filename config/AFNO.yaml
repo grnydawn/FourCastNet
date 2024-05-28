@@ -45,7 +45,7 @@ full_field: &FULL_FIELD
   orography_path: None
 
   log_to_screen: !!bool True
-  log_to_wandb: !!bool True
+  log_to_tensorboard: !!bool True
   save_checkpoint: !!bool True
 
   enable_nhwc: !!bool False
@@ -61,7 +61,7 @@ full_field: &FULL_FIELD
 
 afno_backbone: &backbone
   <<: *FULL_FIELD
-  log_to_wandb: !!bool True
+  log_to_tensorboard: !!bool True
   lr: 5E-4
   batch_size: 64
   max_epochs: 150
@@ -87,7 +87,7 @@ afno_backbone_finetune:
   <<: *backbone
   lr: 1E-4
   batch_size: 64
-  log_to_wandb: !!bool True
+  log_to_tensorboard: !!bool True
   max_epochs: 50
   pretrained: !!bool True
   two_step_training: !!bool True
@@ -120,7 +120,7 @@ precip: &precip
   out_channels: [0]
   nettype: 'afno'
   nettype_wind: 'afno'
-  log_to_wandb: !!bool True
+  log_to_tensorboard: !!bool True
   lr: 2.5E-4
   batch_size: 64
   max_epochs: 25
