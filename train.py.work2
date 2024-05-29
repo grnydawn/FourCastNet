@@ -89,7 +89,7 @@ class Trainer():
     self.world_rank = world_rank
     self.device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
 
-    self.tbdir = f"{params.experiment_dir}/profile/tblogs_{world_rank}"
+    self.tbdir = f"{params.experiment_dir}/runs/tblogs_{world_rank}"
 
     #if params.log_to_wandb:
     #  wandb.init(config=params, name=params.name, group=params.group, project=params.project, entity=params.entity)
@@ -215,6 +215,8 @@ class Trainer():
         record_shapes=True
     ) as p:
       for epoch in range(self.startEpoch, self.params.max_epochs):
+        count = int(epoch)
+
         if dist.is_initialized():
           self.train_sampler.set_epoch(epoch)
   #        self.valid_sampler.set_epoch(epoch)
@@ -234,12 +236,7 @@ class Trainer():
           if self.epoch >= self.params.max_epochs:
             logging.info("Terminating training after reaching params.max_epochs while LR scheduler is set to CosineAnnealingLR")
             exit()
-
-        p.step()
-
-        #if epoch - self.startEpoch >= 2:
-        #  break
-
+  
         #if self.params.log_to_wandb:
         #  for pg in self.optimizer.param_groups:
         #    lr = pg['lr']
@@ -258,8 +255,13 @@ class Trainer():
           logging.info('Time taken for epoch {} is {} sec'.format(epoch + 1, time.time()-start))
           #logging.info('train data time={}, train step time={}, valid step time={}'.format(data_time, tr_time, valid_time))
           logging.info('Train loss: {}. Valid loss: {}'.format(train_logs['loss'], valid_logs['valid_loss']))
-  #        if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
-  #          logging.info('Final Valid RMSE: Z500- {}. T850- {}, 2m_T- {}'.format(valid_weighted_rmse[0], valid_weighted_rmse[1], valid_weighted_rmse[2]))
+#          if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
+#            logging.info('Final Valid RMSE: Z500- {}. T850- {}, 2m_T- {}'.format(valid_weighted_rmse[0], valid_weighted_rmse[1], valid_weighted_rmse[2]))
+
+        p.step()
+
+        if count - self.startEpoch >= 3:
+          break
 
 
 

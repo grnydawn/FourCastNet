@@ -25,7 +25,7 @@ module load cray-python/3.11.5
 . .venv/bin/activate
 
 set -x
-srun -u --mpi=pmi2 \
+srun -n 16 -u --mpi=pmi2 \
     bash -c "
     source export_DDP_vars.sh
     python train.py --enable_amp --yaml_config=$config_file --config=$config --run_num=$run_num
