@@ -65,7 +65,7 @@ from utils.YParams import YParams
 from utils.data_loader_multifiles import get_data_loader
 from networks.afnonet import AFNONet, PrecipNet
 from utils.img_utils import vis_precip
-#import wandb
+from torch.utils.tensorboard import SummaryWriter
 from utils.weighted_acc_rmse import weighted_acc, weighted_rmse, weighted_rmse_torch, unlog_tp_torch
 #from apex import optimizers # Depredicated
 from utils.darcy_loss import LpLoss
@@ -77,8 +77,6 @@ import json
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap as ruamelDict
 
-from torch.profiler import profile, schedule, tensorboard_trace_handler, ProfilerActivity
-
 class Trainer():
   def count_parameters(self):
     return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -88,8 +86,6 @@ class Trainer():
     self.params = params
     self.world_rank = world_rank
     self.device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
-
-    self.tbdir = f"{params.experiment_dir}/profile/tblogs_{world_rank}"
 
     #if params.log_to_wandb:
     #  wandb.init(config=params, name=params.name, group=params.group, project=params.project, entity=params.entity)
@@ -146,8 +142,17 @@ class Trainer():
       # NHWC: Convert model to channels_last memory format
       self.model = self.model.to(memory_format=torch.channels_last)
 
+    self.tbdir = f"{params.experiment_dir}/runs/tblogs_{world_rank}"
     #if params.log_to_wandb:
     #  wandb.watch(self.model)
+    if params.log_to_tensorboard:
+      if not os.path.isdir(self.tbdir):
+        os.makedirs(self.tbdir)
+      self.writer = SummaryWriter(self.tbdir)
+
+      first_data = next(iter(self.train_data_loader))
+      inp, tar = map(lambda x: x.to(self.device, dtype = torch.float), first_data)
+      self.writer.add_graph(self.model, inp)
 
     if params.optimizer_type == 'FusedAdam':
       self.optimizer = optimizers.FusedAdam(self.model.parameters(), lr = params.lr)
@@ -192,6 +197,11 @@ class Trainer():
     if params.log_to_screen:
       logging.info("Number of trainable model parameters: {}".format(self.count_parameters()))
 
+  def __del__(self):
+
+    if params.log_to_tensorboard:
+      self.writer.close()
+
   def switch_off_grad(self, model):
     for param in model.parameters():
       param.requires_grad = False
@@ -201,65 +211,52 @@ class Trainer():
       logging.info("Starting Training Loop...")
 
     best_valid_loss = 1.e6
+    for epoch in range(self.startEpoch, self.params.max_epochs):
+      if dist.is_initialized():
+        self.train_sampler.set_epoch(epoch)
+#        self.valid_sampler.set_epoch(epoch)
 
-    with profile(
-        activities=[
-            ProfilerActivity.CPU,
-            ProfilerActivity.CUDA],
-        schedule=schedule(
-            wait=0,
-            warmup=1,
-            active=2),
-        with_stack=False,
-        on_trace_ready=tensorboard_trace_handler(self.tbdir),
-        record_shapes=True
-    ) as p:
-      for epoch in range(self.startEpoch, self.params.max_epochs):
-        if dist.is_initialized():
-          self.train_sampler.set_epoch(epoch)
-  #        self.valid_sampler.set_epoch(epoch)
-  
-        start = time.time()
-        tr_time, data_time, train_logs = self.train_one_epoch()
-        valid_time, valid_logs = self.validate_one_epoch()
-        if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
-          valid_weighted_rmse = self.validate_final()
-  
-  
-  
-        if self.params.scheduler == 'ReduceLROnPlateau':
-          self.scheduler.step(valid_logs['valid_loss'])
-        elif self.params.scheduler == 'CosineAnnealingLR':
-          self.scheduler.step()
-          if self.epoch >= self.params.max_epochs:
-            logging.info("Terminating training after reaching params.max_epochs while LR scheduler is set to CosineAnnealingLR")
-            exit()
+      start = time.time()
+      tr_time, data_time, train_logs = self.train_one_epoch()
+      valid_time, valid_logs = self.validate_one_epoch()
+      if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
+        valid_weighted_rmse = self.validate_final()
 
-        p.step()
 
-        #if epoch - self.startEpoch >= 2:
-        #  break
 
-        #if self.params.log_to_wandb:
-        #  for pg in self.optimizer.param_groups:
-        #    lr = pg['lr']
-        #  wandb.log({'lr': lr})
-  
-        if self.world_rank == 0:
-          if self.params.save_checkpoint:
-            #checkpoint at the end of every epoch
-            self.save_checkpoint(self.params.checkpoint_path)
-            if valid_logs['valid_loss'] <= best_valid_loss:
-              #logging.info('Val loss improved from {} to {}'.format(best_valid_loss, valid_logs['valid_loss']))
-              self.save_checkpoint(self.params.best_checkpoint_path)
-              best_valid_loss = valid_logs['valid_loss']
-  
-        if self.params.log_to_screen:
-          logging.info('Time taken for epoch {} is {} sec'.format(epoch + 1, time.time()-start))
-          #logging.info('train data time={}, train step time={}, valid step time={}'.format(data_time, tr_time, valid_time))
-          logging.info('Train loss: {}. Valid loss: {}'.format(train_logs['loss'], valid_logs['valid_loss']))
-  #        if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
-  #          logging.info('Final Valid RMSE: Z500- {}. T850- {}, 2m_T- {}'.format(valid_weighted_rmse[0], valid_weighted_rmse[1], valid_weighted_rmse[2]))
+      if self.params.scheduler == 'ReduceLROnPlateau':
+        self.scheduler.step(valid_logs['valid_loss'])
+      elif self.params.scheduler == 'CosineAnnealingLR':
+        self.scheduler.step()
+        if self.epoch >= self.params.max_epochs:
+          logging.info("Terminating training after reaching params.max_epochs while LR scheduler is set to CosineAnnealingLR")
+          exit()
+
+      if self.params.log_to_tensorboard:
+        for pg in self.optimizer.param_groups:
+          lr = pg['lr']
+        self.writer.add_scalar('lr', lr, epoch)
+
+      #if self.params.log_to_wandb:
+      #  for pg in self.optimizer.param_groups:
+      #    lr = pg['lr']
+      #  wandb.log({'lr': lr})
+
+      if self.world_rank == 0:
+        if self.params.save_checkpoint:
+          #checkpoint at the end of every epoch
+          self.save_checkpoint(self.params.checkpoint_path)
+          if valid_logs['valid_loss'] <= best_valid_loss:
+            #logging.info('Val loss improved from {} to {}'.format(best_valid_loss, valid_logs['valid_loss']))
+            self.save_checkpoint(self.params.best_checkpoint_path)
+            best_valid_loss = valid_logs['valid_loss']
+
+      if self.params.log_to_screen:
+        logging.info('Time taken for epoch {} is {} sec'.format(epoch + 1, time.time()-start))
+        #logging.info('train data time={}, train step time={}, valid step time={}'.format(data_time, tr_time, valid_time))
+        logging.info('Train loss: {}. Valid loss: {}'.format(train_logs['loss'], valid_logs['valid_loss']))
+#        if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
+#          logging.info('Final Valid RMSE: Z500- {}. T850- {}, 2m_T- {}'.format(valid_weighted_rmse[0], valid_weighted_rmse[1], valid_weighted_rmse[2]))
 
 
 
@@ -332,6 +329,9 @@ class Trainer():
         dist.all_reduce(logs[key].detach())
         logs[key] = float(logs[key]/dist.get_world_size())
 
+    if self.params.log_to_tensorboard:
+      #tb_logs = {k: (v.item() if hasattr(v, "item") else v) for k, v in logs.items()}
+      self.writer.add_scalars('Loss', logs, self.epoch)
     #if self.params.log_to_wandb:
     #  wandb.log(logs, step=self.epoch)
 
@@ -387,7 +387,7 @@ class Trainer():
 
         valid_steps += 1.
         # save fields for vis before log norm 
-        if (i == sample_idx) and (self.precip and self.params.log_to_wandb):
+        if (i == sample_idx) and (self.precip and self.params.log_to_tensorboard):
           fields = [gen[0,0].detach().cpu().numpy(), tar[0,0].detach().cpu().numpy()]
 
         if self.precip:
@@ -413,10 +413,16 @@ class Trainer():
             except:
                 pass
             #save first channel of image
+            image_data = torch.cat((gen_step_one[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1)
+            image_path = params['experiment_dir'] + "/" + str(i) + "/" + str(self.epoch) + ".png"
+
+            if self.params.log_to_tensorboard:
+              self.writer.add_image("first_channel_of_image", image_data, global_step=self.epoch, dataformats='HW')
+
             if self.params.two_step_training:
-                save_image(torch.cat((gen_step_one[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1), params['experiment_dir'] + "/" + str(i) + "/" + str(self.epoch) + ".png")
+              save_image(image_data, image_path)
             else:
-                save_image(torch.cat((gen[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1), params['experiment_dir'] + "/" + str(i) + "/" + str(self.epoch) + ".png")
+              save_image(image_data, image_path)
 
            
     if dist.is_initialized():
@@ -442,7 +448,11 @@ class Trainer():
         logs = {'valid_l1': valid_buff_cpu[1], 'valid_loss': valid_buff_cpu[0], 'valid_rmse_u10': valid_weighted_rmse_cpu[0], 'valid_rmse_v10': valid_weighted_rmse_cpu[1]}
       except:
         logs = {'valid_l1': valid_buff_cpu[1], 'valid_loss': valid_buff_cpu[0], 'valid_rmse_u10': valid_weighted_rmse_cpu[0]}#, 'valid_rmse_v10': valid_weighted_rmse[1]}
-    
+
+    if self.params.log_to_tensorboard:
+      #tb_logs = {k: (v.item() if hasattr(v, "item") else v) for k, v in logs.items()}
+      self.writer.add_scalars('Valid', logs, self.epoch)
+   
     #if self.params.log_to_wandb:
     #  if self.precip:
     #    fig = vis_precip(fields)
@@ -605,15 +615,15 @@ if __name__ == '__main__':
 #  params['name'] = args.config + '_' + str(args.run_num)
 #  params['group'] = "era5_wind" + args.config
   params['name'] = args.config + '_' + str(args.run_num)
-  params['group'] = "era5_precip" + args.config
-  params['project'] = "ERA5_precip"
+  params['group'] = "era5_tblog" + args.config
+  params['project'] = "ERA5_tblog"
   params['entity'] = "flowgan"
   if world_rank==0:
     logging_utils.log_to_file(logger_name=None, log_filename=os.path.join(expDir, 'out.log'))
     logging_utils.log_versions()
     params.log()
 
-  #params['log_to_wandb'] = (world_rank==0) and params['log_to_wandb']
+  params['log_to_tensorboard'] = (world_rank==0) and params['log_to_tensorboard']
   params['log_to_screen'] = (world_rank==0) and params['log_to_screen']
 
   params['in_channels'] = np.array(params['in_channels'])

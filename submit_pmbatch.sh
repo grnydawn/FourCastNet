@@ -3,7 +3,8 @@
 #SBATCH --time=02:00:00
 #SBATCH -C gpu
 #SBATCH --account=m4259_g
-#SBATCH --nodes=16
+##SBATCH --nodes=16
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
@@ -28,5 +29,7 @@ set -x
 srun -n 16 -u --mpi=pmi2 \
     bash -c "
     source export_DDP_vars.sh
-    python train.py --enable_amp --yaml_config=$config_file --config=$config --run_num=$run_num
+    python train_profile_1epoch.py --enable_amp --yaml_config=$config_file --config=$config --run_num=$run_num
     "
+
+    #python train.py --enable_amp --yaml_config=$config_file --config=$config --run_num=$run_num

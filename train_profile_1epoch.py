@@ -77,6 +77,8 @@ import json
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap as ruamelDict
 
+from torch.profiler import profile, schedule, tensorboard_trace_handler, ProfilerActivity
+
 class Trainer():
   def count_parameters(self):
     return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -86,6 +88,8 @@ class Trainer():
     self.params = params
     self.world_rank = world_rank
     self.device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
+
+    self.tbdir = f"{params.experiment_dir}/profile/{world_rank}"
 
     #if params.log_to_wandb:
     #  wandb.init(config=params, name=params.name, group=params.group, project=params.project, entity=params.entity)
@@ -218,6 +222,9 @@ class Trainer():
           logging.info("Terminating training after reaching params.max_epochs while LR scheduler is set to CosineAnnealingLR")
           exit()
 
+      #if epoch - self.startEpoch >= 2:
+      #  break
+
       #if self.params.log_to_wandb:
       #  for pg in self.optimizer.param_groups:
       #    lr = pg['lr']
@@ -247,59 +254,78 @@ class Trainer():
     data_time = 0
     self.model.train()
     
-    for i, data in enumerate(self.train_data_loader, 0):
-      self.iters += 1
-      # adjust_LR(optimizer, params, iters)
-      data_start = time.time()
-      inp, tar = map(lambda x: x.to(self.device, dtype = torch.float), data)      
-      if self.params.orography and self.params.two_step_training:
-          orog = inp[:,-2:-1] 
+    pcount = 0
 
-
-      if self.params.enable_nhwc:
-        inp = inp.to(memory_format=torch.channels_last)
-        tar = tar.to(memory_format=torch.channels_last)
-
-
-      if 'residual_field' in self.params.target:
-        tar -= inp[:, 0:tar.size()[1]]
-      data_time += time.time() - data_start
-
-      tr_start = time.time()
-
-      self.model.zero_grad()
-      if self.params.two_step_training:
-          with amp.autocast(self.params.enable_amp):
-            gen_step_one = self.model(inp).to(self.device, dtype = torch.float)
-            loss_step_one = self.loss_obj(gen_step_one, tar[:,0:self.params.N_out_channels])
-            if self.params.orography:
-                gen_step_two = self.model(torch.cat( (gen_step_one, orog), axis = 1)  ).to(self.device, dtype = torch.float)
-            else:
-                gen_step_two = self.model(gen_step_one).to(self.device, dtype = torch.float)
-            loss_step_two = self.loss_obj(gen_step_two, tar[:,self.params.N_out_channels:2*self.params.N_out_channels])
-            loss = loss_step_one + loss_step_two
-      else:
-          with amp.autocast(self.params.enable_amp):
-            if self.precip: # use a wind model to predict 17(+n) channels at t+dt
-              with torch.no_grad():
-                inp = self.model_wind(inp).to(self.device, dtype = torch.float)
-              gen = self.model(inp.detach()).to(self.device, dtype = torch.float)
-            else:
-              gen = self.model(inp).to(self.device, dtype = torch.float)
-            loss = self.loss_obj(gen, tar)
-
-      if self.params.enable_amp:
-        self.gscaler.scale(loss).backward()
-        self.gscaler.step(self.optimizer)
-      else:
-        loss.backward()
-        self.optimizer.step()
-
-      if self.params.enable_amp:
-        self.gscaler.update()
-
-      tr_time += time.time() - tr_start
+    with profile(
+        activities=[
+            ProfilerActivity.CPU,
+            ProfilerActivity.CUDA],
+        schedule=schedule(
+            wait=0,
+            warmup=1,
+            active=2),
+        with_stack=False,
+        on_trace_ready=tensorboard_trace_handler(self.tbdir),
+        record_shapes=True
+    ) as p:
+      for i, data in enumerate(self.train_data_loader, 0):
+        self.iters += 1
+        # adjust_LR(optimizer, params, iters)
+        data_start = time.time()
+        inp, tar = map(lambda x: x.to(self.device, dtype = torch.float), data)      
+        if self.params.orography and self.params.two_step_training:
+            orog = inp[:,-2:-1] 
+  
+  
+        if self.params.enable_nhwc:
+          inp = inp.to(memory_format=torch.channels_last)
+          tar = tar.to(memory_format=torch.channels_last)
+  
+  
+        if 'residual_field' in self.params.target:
+          tar -= inp[:, 0:tar.size()[1]]
+        data_time += time.time() - data_start
+  
+        tr_start = time.time()
+  
+        self.model.zero_grad()
+        if self.params.two_step_training:
+            with amp.autocast(self.params.enable_amp):
+              gen_step_one = self.model(inp).to(self.device, dtype = torch.float)
+              loss_step_one = self.loss_obj(gen_step_one, tar[:,0:self.params.N_out_channels])
+              if self.params.orography:
+                  gen_step_two = self.model(torch.cat( (gen_step_one, orog), axis = 1)  ).to(self.device, dtype = torch.float)
+              else:
+                  gen_step_two = self.model(gen_step_one).to(self.device, dtype = torch.float)
+              loss_step_two = self.loss_obj(gen_step_two, tar[:,self.params.N_out_channels:2*self.params.N_out_channels])
+              loss = loss_step_one + loss_step_two
+        else:
+            with amp.autocast(self.params.enable_amp):
+              if self.precip: # use a wind model to predict 17(+n) channels at t+dt
+                with torch.no_grad():
+                  inp = self.model_wind(inp).to(self.device, dtype = torch.float)
+                gen = self.model(inp.detach()).to(self.device, dtype = torch.float)
+              else:
+                gen = self.model(inp).to(self.device, dtype = torch.float)
+              loss = self.loss_obj(gen, tar)
+  
+        if self.params.enable_amp:
+          self.gscaler.scale(loss).backward()
+          self.gscaler.step(self.optimizer)
+        else:
+          loss.backward()
+          self.optimizer.step()
+  
+        if self.params.enable_amp:
+          self.gscaler.update()
+  
+        tr_time += time.time() - tr_start
     
+        p.step()
+        pcount += 1
+        if pcount == 3:
+          exit()
+
     try:
         logs = {'loss': loss, 'loss_step_one': loss_step_one, 'loss_step_two': loss_step_two}
     except:
