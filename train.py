@@ -65,9 +65,7 @@ from utils.YParams import YParams
 from utils.data_loader_multifiles import get_data_loader
 from networks.afnonet import AFNONet, PrecipNet
 from utils.img_utils import vis_precip
-import wandb
 from utils.weighted_acc_rmse import weighted_acc, weighted_rmse, weighted_rmse_torch, unlog_tp_torch
-from apex import optimizers
 from utils.darcy_loss import LpLoss
 import matplotlib.pyplot as plt
 from collections import OrderedDict
@@ -86,9 +84,6 @@ class Trainer():
     self.params = params
     self.world_rank = world_rank
     self.device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
-
-    if params.log_to_wandb:
-      wandb.init(config=params, name=params.name, group=params.group, project=params.project, entity=params.entity)
 
     logging.info('rank %d, begin data loader init'%world_rank)
     self.train_data_loader, self.train_dataset, self.train_sampler = get_data_loader(params, params.train_data_path, dist.is_initialized(), train=True)
@@ -141,9 +136,6 @@ class Trainer():
     if self.params.enable_nhwc:
       # NHWC: Convert model to channels_last memory format
       self.model = self.model.to(memory_format=torch.channels_last)
-
-    if params.log_to_wandb:
-      wandb.watch(self.model)
 
     if params.optimizer_type == 'FusedAdam':
       self.optimizer = optimizers.FusedAdam(self.model.parameters(), lr = params.lr)
@@ -217,11 +209,6 @@ class Trainer():
         if self.epoch >= self.params.max_epochs:
           logging.info("Terminating training after reaching params.max_epochs while LR scheduler is set to CosineAnnealingLR")
           exit()
-
-      if self.params.log_to_wandb:
-        for pg in self.optimizer.param_groups:
-          lr = pg['lr']
-        wandb.log({'lr': lr})
 
       if self.world_rank == 0:
         if self.params.save_checkpoint:
@@ -310,9 +297,6 @@ class Trainer():
         dist.all_reduce(logs[key].detach())
         logs[key] = float(logs[key]/dist.get_world_size())
 
-    if self.params.log_to_wandb:
-      wandb.log(logs, step=self.epoch)
-
     return tr_time, data_time, logs
 
   def validate_one_epoch(self):
@@ -365,9 +349,6 @@ class Trainer():
 
         valid_steps += 1.
         # save fields for vis before log norm 
-        if (i == sample_idx) and (self.precip and self.params.log_to_wandb):
-          fields = [gen[0,0].detach().cpu().numpy(), tar[0,0].detach().cpu().numpy()]
-
         if self.precip:
           gen = unlog_tp_torch(gen, self.params.precip_eps)
           tar = unlog_tp_torch(tar, self.params.precip_eps)
@@ -421,13 +402,6 @@ class Trainer():
       except:
         logs = {'valid_l1': valid_buff_cpu[1], 'valid_loss': valid_buff_cpu[0], 'valid_rmse_u10': valid_weighted_rmse_cpu[0]}#, 'valid_rmse_v10': valid_weighted_rmse[1]}
     
-    if self.params.log_to_wandb:
-      if self.precip:
-        fig = vis_precip(fields)
-        logs['vis'] = wandb.Image(fig)
-        plt.close(fig)
-      wandb.log(logs, step=self.epoch)
-
     return valid_time, logs
 
   def validate_final(self):
@@ -579,7 +553,6 @@ if __name__ == '__main__':
   params['local_rank'] = local_rank
   params['enable_amp'] = args.enable_amp
 
-  # this will be the wandb name
 #  params['name'] = args.config + '_' + str(args.run_num)
 #  params['group'] = "era5_wind" + args.config
   params['name'] = args.config + '_' + str(args.run_num)
@@ -591,7 +564,6 @@ if __name__ == '__main__':
     logging_utils.log_versions()
     params.log()
 
-  params['log_to_wandb'] = (world_rank==0) and params['log_to_wandb']
   params['log_to_screen'] = (world_rank==0) and params['log_to_screen']
 
   params['in_channels'] = np.array(params['in_channels'])

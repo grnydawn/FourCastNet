@@ -15,3 +15,5 @@ utils/.ipynb_checkpoints/*
 ray_results
 *.pdf
 *.svg
+.venv
+__pycache__
