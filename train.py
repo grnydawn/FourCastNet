@@ -210,7 +210,11 @@ class Trainer():
 #        self.valid_sampler.set_epoch(epoch)
 
       start = time.time()
-      tr_time, data_time, train_logs = self.train_one_epoch()
+      if self.params.log_to_profiling:
+        tr_time, data_time, train_logs = self.train_one_epoch_profile()
+      else:
+        tr_time, data_time, train_logs = self.train_one_epoch()
+
       valid_time, valid_logs = self.validate_one_epoch()
       if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
         valid_weighted_rmse = self.validate_final()
@@ -249,6 +253,80 @@ class Trainer():
 
 
   def train_one_epoch(self):
+    self.epoch += 1
+    tr_time = 0
+    data_time = 0
+    self.model.train()
+    
+    for i, data in enumerate(self.train_data_loader, 0):
+      self.iters += 1
+      # adjust_LR(optimizer, params, iters)
+      data_start = time.time()
+      inp, tar = map(lambda x: x.to(self.device, dtype = torch.float), data)      
+      if self.params.orography and self.params.two_step_training:
+          orog = inp[:,-2:-1] 
+
+
+      if self.params.enable_nhwc:
+        inp = inp.to(memory_format=torch.channels_last)
+        tar = tar.to(memory_format=torch.channels_last)
+
+
+      if 'residual_field' in self.params.target:
+        tar -= inp[:, 0:tar.size()[1]]
+      data_time += time.time() - data_start
+
+      tr_start = time.time()
+
+      self.model.zero_grad()
+      if self.params.two_step_training:
+          with amp.autocast(self.params.enable_amp):
+            gen_step_one = self.model(inp).to(self.device, dtype = torch.float)
+            loss_step_one = self.loss_obj(gen_step_one, tar[:,0:self.params.N_out_channels])
+            if self.params.orography:
+                gen_step_two = self.model(torch.cat( (gen_step_one, orog), axis = 1)  ).to(self.device, dtype = torch.float)
+            else:
+                gen_step_two = self.model(gen_step_one).to(self.device, dtype = torch.float)
+            loss_step_two = self.loss_obj(gen_step_two, tar[:,self.params.N_out_channels:2*self.params.N_out_channels])
+            loss = loss_step_one + loss_step_two
+      else:
+          with amp.autocast(self.params.enable_amp):
+            if self.precip: # use a wind model to predict 17(+n) channels at t+dt
+              with torch.no_grad():
+                inp = self.model_wind(inp).to(self.device, dtype = torch.float)
+              gen = self.model(inp.detach()).to(self.device, dtype = torch.float)
+            else:
+              gen = self.model(inp).to(self.device, dtype = torch.float)
+            loss = self.loss_obj(gen, tar)
+
+      if self.params.enable_amp:
+        self.gscaler.scale(loss).backward()
+        self.gscaler.step(self.optimizer)
+      else:
+        loss.backward()
+        self.optimizer.step()
+
+      if self.params.enable_amp:
+        self.gscaler.update()
+
+      tr_time += time.time() - tr_start
+    
+    try:
+        logs = {'loss': loss, 'loss_step_one': loss_step_one, 'loss_step_two': loss_step_two}
+    except:
+        logs = {'loss': loss}
+
+    if dist.is_initialized():
+      for key in sorted(logs.keys()):
+        dist.all_reduce(logs[key].detach())
+        logs[key] = float(logs[key]/dist.get_world_size())
+
+    if self.params.log_to_tensorboard:
+      self.writer.add_scalars('Loss', logs, self.epoch)
+
+    return tr_time, data_time, logs
+
+  def train_one_epoch_profile(self):
     self.epoch += 1
     tr_time = 0
     data_time = 0

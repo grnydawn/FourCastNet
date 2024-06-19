@@ -46,7 +46,7 @@ full_field: &FULL_FIELD
 
   log_to_screen: !!bool True
   log_to_tensorboard: !!bool True
-  log_to_profiling: !!bool True
+  log_to_profiling: !!bool False # True
   save_checkpoint: !!bool True
 
   enable_nhwc: !!bool False
