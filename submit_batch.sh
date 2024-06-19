@@ -23,6 +23,10 @@ module load cray-python/3.11.5
 
 source .venv/bin/activate
 
+cp -f \
+	/pscratch/sd/y/youngsun/data/FourCastNet/model_weights/FCN_weights_v0_org/backbone.ckpt \
+	/pscratch/sd/y/youngsun/data/FourCastNet/FCN_weights_v0/output/training_checkpoints/best_ckpt.tar	
+
 set -x
 srun -u --mpi=pmi2 \
     bash -c "
