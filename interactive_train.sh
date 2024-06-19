@@ -22,6 +22,8 @@ source .venv/bin/activate
 ngpu=32 # 4
 config_file=./config/AFNO.yaml
 config="afno_backbone"
-run_num="check"
+#run_num="check"
+#run_num="profile"
+run_num="profile_trace"
 cmd="python train.py --enable_amp --yaml_config=$config_file --config=$config --run_num=$run_num"
 srun -n $ngpu bash -c "source export_DDP_vars.sh && $cmd"
