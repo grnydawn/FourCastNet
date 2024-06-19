@@ -547,7 +547,10 @@ if __name__ == '__main__':
   params['best_checkpoint_path'] = os.path.join(expDir, 'training_checkpoints/best_ckpt.tar')
 
   # Do not comment this line out please:
-  args.resuming = True if os.path.isfile(params.checkpoint_path) else False
+  #args.resuming = True if os.path.isfile(params.checkpoint_path) else False
+
+  # Always start from initial state
+  args.resuming = False
 
   params['resuming'] = args.resuming
   params['local_rank'] = local_rank

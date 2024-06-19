@@ -20,7 +20,7 @@ full_field: &FULL_FIELD
   gridtype: 'sinusoidal' #options 'sinusoidal' or 'linear'
   roll: !!bool False
   max_epochs: 50
-  batch_size: 64
+  batch_size: 128
 
   #afno hyperparams
   num_blocks: 8
@@ -61,7 +61,7 @@ full_field: &FULL_FIELD
 afno_backbone: &backbone
   <<: *FULL_FIELD
   lr: 5E-4
-  batch_size: 64
+  batch_size: 128
   max_epochs: 150
   scheduler: 'CosineAnnealingLR'
   in_channels: [0, 1 ,2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
@@ -85,20 +85,20 @@ afno_backbone_orography: &backbone_orography
 afno_backbone_finetune: 
   <<: *backbone
   lr: 1E-4
-  batch_size: 64
+  batch_size: 128
   max_epochs: 50
   pretrained: !!bool True
   two_step_training: !!bool True
-  pretrained_ckpt_path: '/lustre/orion/cli115/proj-shared/grnydawn/data/fourcastnet/FCN_ERA5_data_v0/output/training_checkpoints/best_ckpt.tar'
+  pretrained_ckpt_path: '/lustre/orion/cli115/proj-shared/grnydawn/data/fourcastnet/FCN_weights_v0/backbone.ckpt'
 
 perturbations:
   <<: *backbone
   lr: 1E-4
-  batch_size: 64
+  batch_size: 128
   max_epochs: 50
   pretrained: !!bool True
   two_step_training: !!bool True
-  pretrained_ckpt_path: '/lustre/orion/cli115/proj-shared/grnydawn/data/fourcastnet/FCN_ERA5_data_v0/output/training_checkpoints/best_ckpt.tar'
+  pretrained_ckpt_path: '/lustre/orion/cli115/proj-shared/grnydawn/data/fourcastnet/FCN_weights_v0/backbone.ckpt'
   prediction_length: 24
   ics_type: "datetime"
   n_perturbations: 100 
@@ -119,7 +119,7 @@ precip: &precip
   nettype: 'afno'
   nettype_wind: 'afno'
   lr: 2.5E-4
-  batch_size: 64
+  batch_size: 128
   max_epochs: 25
   precip: '/pscratch/sd/p/pharring/ERA5/precip/total_precipitation'
   time_means_path_tp: '/pscratch/sd/p/pharring/ERA5/precip/total_precipitation/time_means.npy'

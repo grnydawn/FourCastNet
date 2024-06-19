@@ -1,11 +1,9 @@
 #!/bin/bash -l
-#SBATCH --time=06:00:00
-#SBATCH -C gpu
+#SBATCH --time=02:00:00
 #SBATCH --account=atm112
 #SBATCH --nodes=16
-#SBATCH --ntasks-per-node=4
-#SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=32
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
 #SBATCH -J afno
 #SBATCH -o afno_backbone_finetune.out
 
@@ -27,6 +25,11 @@ module load amd-mixed/6.0.0
 module load craype-accel-amd-gfx90a
 
 source .venv/bin/activate
+
+# copy pre-trained weights for finetune
+cp -f \
+	/lustre/orion/cli115/proj-shared/grnydawn/data/fourcastnet/FCN_weights_v0/backbone.ckpt \
+	/lustre/orion/cli115/proj-shared/grnydawn/data/fourcastnet/FCN_ERA5_data_v0/output/training_checkpoints/best_ckpt.tar
 
 # Create a virtual env. and install the following packages
 # python3 -m venv .venv
