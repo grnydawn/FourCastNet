@@ -12,6 +12,8 @@ source .venv/bin/activate
 ngpu=16 # 4
 config_file=./config/AFNO.yaml
 config="afno_backbone"
-run_num="check"
+#run_num="check"
+#run_num="monitor"
+run_num="profile"
 cmd="python train.py --enable_amp --yaml_config=$config_file --config=$config --run_num=$run_num"
 srun -n $ngpu --cpus-per-task=32 --gpus-per-node 4 bash -c "source export_DDP_vars.sh && $cmd"

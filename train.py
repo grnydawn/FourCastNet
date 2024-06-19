@@ -65,6 +65,7 @@ from utils.YParams import YParams
 from utils.data_loader_multifiles import get_data_loader
 from networks.afnonet import AFNONet, PrecipNet
 from utils.img_utils import vis_precip
+from torch.utils.tensorboard import SummaryWriter
 from utils.weighted_acc_rmse import weighted_acc, weighted_rmse, weighted_rmse_torch, unlog_tp_torch
 from utils.darcy_loss import LpLoss
 import matplotlib.pyplot as plt
@@ -74,6 +75,7 @@ DECORRELATION_TIME = 36 # 9 days
 import json
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap as ruamelDict
+from torch.profiler import profile, schedule, tensorboard_trace_handler, ProfilerActivity
 
 class Trainer():
   def count_parameters(self):
@@ -84,7 +86,6 @@ class Trainer():
     self.params = params
     self.world_rank = world_rank
     self.device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
-
 
     logging.info('rank %d, begin data loader init'%world_rank)
     self.train_data_loader, self.train_dataset, self.train_sampler = get_data_loader(params, params.train_data_path, dist.is_initialized(), train=True)
@@ -138,6 +139,14 @@ class Trainer():
       # NHWC: Convert model to channels_last memory format
       self.model = self.model.to(memory_format=torch.channels_last)
 
+    if params.log_to_tensorboard:
+      if not os.path.isdir(params.tensorboard_path):
+        os.makedirs(params.tensorboard_path)
+      self.writer = SummaryWriter(params.tensorboard_path)
+
+      first_data = next(iter(self.train_data_loader))
+      inp, tar = map(lambda x: x.to(self.device, dtype = torch.float), first_data)
+      self.writer.add_graph(self.model, inp)
 
     if params.optimizer_type == 'FusedAdam':
       self.optimizer = optimizers.FusedAdam(self.model.parameters(), lr = params.lr)
@@ -182,6 +191,10 @@ class Trainer():
     if params.log_to_screen:
       logging.info("Number of trainable model parameters: {}".format(self.count_parameters()))
 
+  def __del__(self):
+    if params.log_to_tensorboard:
+      self.writer.close()
+
   def switch_off_grad(self, model):
     for param in model.parameters():
       param.requires_grad = False
@@ -197,7 +210,11 @@ class Trainer():
 #        self.valid_sampler.set_epoch(epoch)
 
       start = time.time()
-      tr_time, data_time, train_logs = self.train_one_epoch()
+      if self.params.log_to_profiling:
+        tr_time, data_time, train_logs = self.train_one_epoch_profile()
+      else:
+        tr_time, data_time, train_logs = self.train_one_epoch()
+
       valid_time, valid_logs = self.validate_one_epoch()
       if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
         valid_weighted_rmse = self.validate_final()
@@ -212,6 +229,10 @@ class Trainer():
           logging.info("Terminating training after reaching params.max_epochs while LR scheduler is set to CosineAnnealingLR")
           exit()
 
+      if self.params.log_to_tensorboard:
+        for pg in self.optimizer.param_groups:
+          lr = pg['lr']
+        self.writer.add_scalar('lr', lr, epoch)
 
       if self.world_rank == 0:
         if self.params.save_checkpoint:
@@ -300,6 +321,103 @@ class Trainer():
         dist.all_reduce(logs[key].detach())
         logs[key] = float(logs[key]/dist.get_world_size())
 
+    if self.params.log_to_tensorboard:
+      self.writer.add_scalars('Loss', logs, self.epoch)
+
+    return tr_time, data_time, logs
+
+  def train_one_epoch_profile(self):
+    self.epoch += 1
+    tr_time = 0
+    data_time = 0
+    self.model.train()
+    
+    pcount = 0
+
+    with profile(
+        activities=[
+            ProfilerActivity.CPU,
+            ProfilerActivity.CUDA],
+        schedule=schedule(
+            wait=0,
+            warmup=1,
+            active=5),
+        with_stack=False,
+        on_trace_ready=tensorboard_trace_handler(self.params.tensorboard_path),
+        record_shapes=True
+    ) as p:
+      for i, data in enumerate(self.train_data_loader, 0):
+        self.iters += 1
+        # adjust_LR(optimizer, params, iters)
+        data_start = time.time()
+        inp, tar = map(lambda x: x.to(self.device, dtype = torch.float), data)      
+        if self.params.orography and self.params.two_step_training:
+            orog = inp[:,-2:-1] 
+  
+  
+        if self.params.enable_nhwc:
+          inp = inp.to(memory_format=torch.channels_last)
+          tar = tar.to(memory_format=torch.channels_last)
+  
+  
+        if 'residual_field' in self.params.target:
+          tar -= inp[:, 0:tar.size()[1]]
+        data_time += time.time() - data_start
+  
+        tr_start = time.time()
+  
+        self.model.zero_grad()
+        if self.params.two_step_training:
+            with amp.autocast(self.params.enable_amp):
+              gen_step_one = self.model(inp).to(self.device, dtype = torch.float)
+              loss_step_one = self.loss_obj(gen_step_one, tar[:,0:self.params.N_out_channels])
+              if self.params.orography:
+                  gen_step_two = self.model(torch.cat( (gen_step_one, orog), axis = 1)  ).to(self.device, dtype = torch.float)
+              else:
+                  gen_step_two = self.model(gen_step_one).to(self.device, dtype = torch.float)
+              loss_step_two = self.loss_obj(gen_step_two, tar[:,self.params.N_out_channels:2*self.params.N_out_channels])
+              loss = loss_step_one + loss_step_two
+        else:
+            with amp.autocast(self.params.enable_amp):
+              if self.precip: # use a wind model to predict 17(+n) channels at t+dt
+                with torch.no_grad():
+                  inp = self.model_wind(inp).to(self.device, dtype = torch.float)
+                gen = self.model(inp.detach()).to(self.device, dtype = torch.float)
+              else:
+                gen = self.model(inp).to(self.device, dtype = torch.float)
+              loss = self.loss_obj(gen, tar)
+  
+        if self.params.enable_amp:
+          self.gscaler.scale(loss).backward()
+          self.gscaler.step(self.optimizer)
+        else:
+          loss.backward()
+          self.optimizer.step()
+  
+        if self.params.enable_amp:
+          self.gscaler.update()
+  
+        tr_time += time.time() - tr_start
+
+        p.step()
+
+        pcount += 1
+
+        if pcount == 6:
+          exit()
+    
+    try:
+        logs = {'loss': loss, 'loss_step_one': loss_step_one, 'loss_step_two': loss_step_two}
+    except:
+        logs = {'loss': loss}
+
+    if dist.is_initialized():
+      for key in sorted(logs.keys()):
+        dist.all_reduce(logs[key].detach())
+        logs[key] = float(logs[key]/dist.get_world_size())
+
+    if self.params.log_to_tensorboard:
+      self.writer.add_scalars('Loss', logs, self.epoch)
 
     return tr_time, data_time, logs
 
@@ -352,6 +470,9 @@ class Trainer():
             valid_l1 += nn.functional.l1_loss(gen, tar)
 
         valid_steps += 1.
+        # save fields for vis before log norm 
+        if (i == sample_idx) and (self.precip and self.params.log_to_tensorboard):
+          fields = [gen[0,0].detach().cpu().numpy(), tar[0,0].detach().cpu().numpy()]
 
         if self.precip:
           gen = unlog_tp_torch(gen, self.params.precip_eps)
@@ -375,13 +496,19 @@ class Trainer():
                 os.mkdir(params['experiment_dir'] + "/" + str(i))
             except:
                 pass
+
             #save first channel of image
             if self.params.two_step_training:
-                save_image(torch.cat((gen_step_one[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1), params['experiment_dir'] + "/" + str(i) + "/" + str(self.epoch) + ".png")
+                image_data = torch.cat((gen_step_one[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1)
             else:
-                save_image(torch.cat((gen[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1), params['experiment_dir'] + "/" + str(i) + "/" + str(self.epoch) + ".png")
+                image_data = torch.cat((gen[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1)
 
-           
+            image_path = params['experiment_dir'] + "/" + str(i) + "/" + str(self.epoch) + ".png"
+            save_image(image_data, image_path)
+ 
+            if self.params.log_to_tensorboard:
+              self.writer.add_image("first_channel_of_image", image_data, global_step=self.epoch, dataformats='HW')
+          
     if dist.is_initialized():
       dist.all_reduce(valid_buff)
       dist.all_reduce(valid_weighted_rmse)
@@ -405,6 +532,9 @@ class Trainer():
         logs = {'valid_l1': valid_buff_cpu[1], 'valid_loss': valid_buff_cpu[0], 'valid_rmse_u10': valid_weighted_rmse_cpu[0], 'valid_rmse_v10': valid_weighted_rmse_cpu[1]}
       except:
         logs = {'valid_l1': valid_buff_cpu[1], 'valid_loss': valid_buff_cpu[0], 'valid_rmse_u10': valid_weighted_rmse_cpu[0]}#, 'valid_rmse_v10': valid_weighted_rmse[1]}
+    
+    if self.params.log_to_tensorboard:
+      self.writer.add_scalars('Valid', logs, self.epoch)
 
     return valid_time, logs
 
@@ -560,7 +690,6 @@ if __name__ == '__main__':
   params['local_rank'] = local_rank
   params['enable_amp'] = args.enable_amp
 
-  # this will be the wandb name
 #  params['name'] = args.config + '_' + str(args.run_num)
 #  params['group'] = "era5_wind" + args.config
   params['name'] = args.config + '_' + str(args.run_num)
@@ -573,6 +702,9 @@ if __name__ == '__main__':
     params.log()
 
   params['log_to_screen'] = (world_rank==0) and params['log_to_screen']
+  params['log_to_tensorboard'] = (local_rank==0) and params['log_to_tensorboard']
+
+  params['tensorboard_path'] = os.path.join(expDir, 'tensorboard', str(world_rank))
 
   params['in_channels'] = np.array(params['in_channels'])
   params['out_channels'] = np.array(params['out_channels'])
